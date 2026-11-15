@@ -11,13 +11,11 @@ The full guide to the panel, map and slash commands is in [OldmanJava/README.md]
 
 ## Install
 
-No release has been published yet. To build one yourself:
+Download `OldmanJava-<version>-Forever.zip` from the [latest release](https://github.com/nickdemari/oldman-java/releases/latest) and unzip it into `_forever_/Interface/AddOns` in your World of Warcraft folder. It holds two folders, `OldmanJava` and `QuestieDB`, and both go in AddOns. Questie itself is optional.
 
-```
-./build.sh
-```
+If you already have QuestieDB (it comes with Questie), you can use the smaller `-CurseForge.zip` instead, which holds only `OldmanJava`.
 
-The script needs `curl`, `unzip`, `zip`, `python3` and `shasum`. It downloads the latest stable [QuestieDB](https://github.com/Questie/QuestieDB) Forever release, verifies its checksum, and writes `dist/OldmanJava-<version>-Forever.zip`. Unzip that into `_forever_/Interface/AddOns` in your World of Warcraft folder. It holds two folders, `OldmanJava` and `QuestieDB`, and both go in AddOns. Questie itself is optional.
+To build the zips yourself, run `./build.sh`. It needs `curl`, `unzip`, `zip`, `python3` and `shasum`. It downloads the latest stable [QuestieDB](https://github.com/Questie/QuestieDB) Forever release, verifies its checksum, and writes both zips to `dist/`.
 
 ## Development
 
