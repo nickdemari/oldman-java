@@ -733,9 +733,31 @@ end
 -- Builds the index in slices; call repeatedly from a coroutine. Yields every `slice` quests.
 Data.itemOnlyIds = {}
 
+-- Yields once about SLICE_MS of work has run, however many steps that took (one step's cost
+-- varies with what QuestieDB has to decode). Counts steps where there's no clock.
+local SLICE_MS = 2
+local function Slicer(every)
+    if not every then return function() end end
+    local clock = debugprofilestop
+    if not clock then
+        local n = 0
+        return function()
+            n = n + 1
+            if n % every == 0 then coroutine.yield() end
+        end
+    end
+    local last = clock()
+    return function()
+        if clock() - last >= SLICE_MS then
+            coroutine.yield()
+            last = clock()
+        end
+    end
+end
+
 function Data.BuildIndex(yieldEvery)
     local ids = QuestDB.GetAllIds()
-    local count = 0
+    local tick = Slicer(yieldEvery)
     local itemOnly = {}
     for i = 1, #ids do
         local id = ids[i]
@@ -746,11 +768,33 @@ function Data.BuildIndex(yieldEvery)
         local info = questInfo[id]
         NoteInfo(id, info)
         if info and info.itemOnly and not info.blocked then itemOnly[#itemOnly + 1] = id end
-        count = count + 1
-        if yieldEvery and count % yieldEvery == 0 then coroutine.yield() end
+        tick()
     end
     Data.itemOnlyIds = itemOnly
     Data.indexReady = true
+end
+
+-- Friendly innkeepers, for setting your hearthstone: { id, name, pt }. Found once per session.
+-- GetRaw reads one row without keeping it, so scanning every NPC leaves nothing cached.
+Data.inns = {}
+function Data.BuildInns(yieldEvery)
+    local enum = LibQuestieDB.Enum and LibQuestieDB.Enum.npcFlags
+    local flag = enum and enum.INNKEEPER
+    if not flag then return end
+    local read = NpcDB.GetRaw or NpcDB.Get
+    local ids = NpcDB.GetAllIds()
+    local tick = Slicer(yieldEvery)
+    local inns = {}
+    for i = 1, #ids do
+        local id = ids[i]
+        local flags = read(id, "npcFlags")
+        if type(flags) == "number" and HasBit(flags, flag) and FriendlyStarter(id) then
+            local points = AddSpawnPoints(NpcDB.spawns(id), {})
+            if points[1] then inns[#inns + 1] = { id = id, name = NpcDB.name(id), pt = points[1] } end
+        end
+        tick()
+    end
+    Data.inns = inns
 end
 
 function Data.Info(id)

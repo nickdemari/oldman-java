@@ -243,6 +243,15 @@ local function Build()
             db().classQuests = v
             SP.RequestPlan()
         end))
+    y = Row(y, "Fly and hearth when it's quicker", "Uses the flight paths you know and your hearthstone.",
+        Toggle(frame, function() return db().shortcuts ~= false end, function(v)
+            db().shortcuts = v
+            SP.RequestPlan()
+        end))
+    y = Row(y, "Accept and turn in for me", "Takes the quests your route wants and hands in finished ones. Hold Shift to do it yourself.",
+        Toggle(frame, function() return db().autoQuest ~= false end, function(v)
+            db().autoQuest = v
+        end))
     y = Row(y, "Skipped quests", function()
         local n = SkippedCount()
         return n == 0 and "You haven't skipped any quests." or string.format("%d skipped. Clear to put them back on the route.", n)

@@ -52,13 +52,34 @@ local function Pacer(yield)
     end
 end
 
+-- Flying (SP.Shortcuts.Fly) while flight paths are on; set at the start of every plan.
+local fly
+local FLY_MIN = 60 -- seconds: a shorter walk is never beaten by a flight
+
+-- Seconds from a to b: walking, or flying when that's quicker.
 local function Travel(a, b, speed)
     if not a or not b then return 0 end
     if a.c ~= b.c then return OTHER_CONTINENT end
     local dx, dy = a.wx - b.wx, a.wy - b.wy
-    return (dx * dx + dy * dy) ^ 0.5 / speed
+    local walk = (dx * dx + dy * dy) ^ 0.5 / speed
+    if fly and walk > FLY_MIN then
+        local t = fly(a, b, speed)
+        if t and t < walk then return t end
+    end
+    return walk
 end
 Planner.Travel = Travel
+
+-- Turns flying on or off for Travel (the planner does this itself; tests call it directly).
+function Planner.UseShortcuts(on)
+    local S = SP.Shortcuts
+    if on and S and S.Enabled() then
+        S.Refresh()
+        fly = #S.Known() > 1 and S.Fly or nil
+    else
+        fly = nil
+    end
+end
 
 local KIND_FROM_GAME = { monster = "kill", item = "item", object = "object", event = "explore" }
 local VERB = { kill = "Kill", item = "Collect", object = "Use", explore = "Explore", event = "" }
@@ -431,6 +452,8 @@ local function EvalUnit(E, unit, speed)
         local dPrev
         if e > 0 then
             dPrev = Travel(insNode[e].pt, pt, speed)
+        elseif fly then
+            dPrev = Travel(BP[g], pt, speed)
         elseif BC[g] ~= xc then
             dPrev = OTHER_CONTINENT
         else
@@ -444,7 +467,9 @@ local function EvalUnit(E, unit, speed)
                 local stop = (nextI <= m) and insGap[nextI] or n
                 for k = g + 1, stop do
                     local dNext
-                    if BC[k] ~= xc then
+                    if fly then
+                        dNext = Travel(pt, BP[k], speed)
+                    elseif BC[k] ~= xc then
                         dNext = OTHER_CONTINENT
                     else
                         local dx, dy = BX[k] - xx, BY[k] - xy
@@ -474,7 +499,9 @@ local function EvalUnit(E, unit, speed)
                 -- from the last placed node of leg g to base node g + 1
                 local k = g + 1
                 local dNext
-                if BC[k] ~= xc then
+                if fly then
+                    dNext = Travel(pt, BP[k], speed)
+                elseif BC[k] ~= xc then
                     dNext = OTHER_CONTINENT
                 else
                     local dx, dy = BX[k] - xx, BY[k] - xy
@@ -818,11 +845,13 @@ local function Optimize(route, start, speed, yield)
 end
 Planner.Optimize = Optimize
 
+-- A hearth step costs its cast, not a walk to the inn; a flight step ends where it lands.
 function Planner.RouteSeconds(route, start, speed)
     local total, prev = 0, start
     for _, node in ipairs(route) do
-        total = total + Travel(prev, node.pt, speed) + node.work
-        prev = node.pt
+        if node.how ~= "hearth" then total = total + Travel(prev, node.pt, speed) end
+        total = total + node.work
+        prev = node.exit or node.pt
     end
     return total
 end
@@ -1055,6 +1084,155 @@ local function CollectCandidates(start, skipped, nearbyOnly, yield)
     return list
 end
 
+---------------------------------------------------------------------------
+-- Shortcuts: flight and hearth steps, added to the finished route
+---------------------------------------------------------------------------
+
+local HEARTH_GAIN = 60 -- seconds: hearth only when it saves at least this much
+local TOWN = 300       -- yards: steps this close to an inn are in its town
+local TOWN_STEPS = 3   -- quest givers the route visits in a town before it's worth calling home
+local BIND_TIME = 10   -- seconds: talking to the innkeeper
+
+local function InTown(node, inn)
+    return node.pt ~= nil and SP.Data.Distance(node.pt, inn.pt) <= TOWN
+end
+
+-- Quest givers the route visits within a town (pickups and turn-ins).
+local function TownSteps(route, pt)
+    local n = 0
+    for _, node in ipairs(route) do
+        if (node.kind == "pickup" or node.kind == "turnin") and node.pt and SP.Data.Distance(node.pt, pt) <= TOWN then
+            n = n + 1
+        end
+    end
+    return n
+end
+
+-- The inn of the town this route works from, when your hearthstone is set somewhere else, and
+-- the slot for stopping by: the cheapest one on your first visit to that town. Otherwise nil and
+-- the reason (for /java travel).
+local function PlanBind(route, start, speed, S)
+    local best, bestSteps, inns = nil, 0, 0
+    for _, inn in ipairs(SP.Data.inns or {}) do
+        if inn.pt.c == start.c then
+            inns = inns + 1
+            local n = TownSteps(route, inn.pt)
+            if n > bestSteps then best, bestSteps = inn, n end
+        end
+    end
+    if inns == 0 then return nil, nil, "no innkeepers known on this continent" end
+    if not best or bestSteps < TOWN_STEPS then
+        return nil, nil, string.format("no town on the route has %d quest givers%s", TOWN_STEPS,
+            best and string.format(" (most: %d near %s)", bestSteps, best.name or "an inn") or "")
+    end
+    local name = (S.InnPlaces(best)[1]) or best.name
+    if S.IsHome(best) then return nil, nil, "it's already set in " .. name .. ", where the route works from" end
+    -- Your current home still holds half as much of the route: no need to move yet.
+    local home = S.Home()
+    if home and bestSteps <= 2 * TownSteps(route, home.pt) then
+        return nil, nil, string.format("%s has %d of the route's quest givers, but home still has half that", name, bestSteps)
+    end
+    local first
+    for i, node in ipairs(route) do
+        if InTown(node, best) then first = i; break end
+    end
+    local last = first
+    while route[last + 1] and InTown(route[last + 1], best) do last = last + 1 end
+    local at, cheapest
+    for pos = first, last + 1 do
+        local prev = pos == 1 and start or route[pos - 1].pt
+        local nxt = route[pos] and route[pos].pt
+        local cost = Travel(prev, best.pt, speed)
+        if nxt then cost = cost + Travel(best.pt, nxt, speed) - Travel(prev, nxt, speed) end
+        if not cheapest or cost < cheapest then at, cheapest = pos, cost end
+    end
+    return best, at
+end
+
+-- Sets your hearthstone in the town the route works from, hearths once, on the leg it shortens
+-- most (once it's off cooldown by then, and to wherever it's set by then), and adds a flight step
+-- before every leg that's quicker by air. Travel already priced the flights, so the order stays.
+local function AddShortcuts(route, start, speed)
+    local S = SP.Shortcuts
+    if not (S and S.Enabled()) then return route end
+    local stone = S.HasHearthstone()
+
+    local stops = route
+    local inn, at
+    if stone then inn, at = PlanBind(route, start, speed, S) end
+    if inn then
+        local places = S.InnPlaces(inn)
+        local town = places[1] or inn.name
+        local step = NewNode("travel", nil, inn.pt, BIND_TIME, "SET HEARTH", "Set hearth at", town,
+            "Ask " .. (inn.name or "the innkeeper") .. " to make this inn your home")
+        step.how, step.made, step.inn = "bind", GetTime(), inn.id
+        stops = {}
+        for i = 1, #route do stops[i] = route[i] end
+        table.insert(stops, at, step)
+    end
+
+    -- Hearth: to your current home until the step that moves it, to the new inn after that.
+    local hearthAt, hearthTo
+    if stone then
+        local home = S.Home()
+        local readyIn = S.ReadyIn()
+        local best, t, prev = HEARTH_GAIN, 0, start
+        for i, node in ipairs(stops) do
+            local leg = Travel(prev, node.pt, speed)
+            if home and t >= readyIn then
+                local gain = leg - (S.HEARTH_TIME + Travel(home.pt, node.pt, speed))
+                if gain > best then best, hearthAt, hearthTo = gain, i, home end
+            end
+            t = t + leg + node.work
+            prev = node.pt
+            if node.how == "bind" then home = { pt = node.pt, name = node.title } end
+        end
+    end
+
+    local out, prev = {}, start
+    for i, node in ipairs(stops) do
+        if i == hearthAt then
+            local step = NewNode("travel", nil, hearthTo.pt, S.HEARTH_TIME, "HEARTH", "Hearth to", hearthTo.name,
+                "Use your Hearthstone")
+            step.how, step.made = "hearth", GetTime()
+            out[#out + 1] = step
+            prev = hearthTo.pt
+        end
+        if fly and prev and node.pt and prev.c == node.pt.c then
+            local dx, dy = prev.wx - node.pt.wx, prev.wy - node.pt.wy
+            local walk = (dx * dx + dy * dy) ^ 0.5 / speed
+            local t, ia, ib
+            if walk > FLY_MIN then t, ia, ib = fly(prev, node.pt, speed) end
+            if t and t < walk then
+                local from, to = S.Node(ia), S.Node(ib)
+                local step = NewNode("travel", nil, from.pt, S.FlightTime(ia, ib), "FLY", "Fly to", to.short,
+                    "Flight master in " .. from.short)
+                step.how, step.exit = "fly", to.pt
+                out[#out + 1] = step
+            end
+        end
+        out[#out + 1] = node
+        prev = node.pt
+    end
+    return out
+end
+
+-- For /java travel: where the route would set your hearthstone now, or why it wouldn't.
+function Planner.BindCheck(start)
+    local S = SP.Shortcuts
+    if not (S and S.HasHearthstone() and start) then return nil end
+    local route = {}
+    for _, node in ipairs(Planner.route) do
+        if not node.how then route[#route + 1] = node end
+    end
+    local inn, _, why = PlanBind(route, start, 7, S)
+    if inn then return "the route sets your hearthstone at " .. ((S.InnPlaces(inn)[1]) or inn.name) .. "." end
+    return "no set-hearth step: " .. why .. "."
+end
+
+-- For the offline tests: the insertion search must price a quest exactly as InsertUnit does.
+Planner._test = { SetBase = SetBase, EvalUnit = EvalUnit, InsertUnit = InsertUnit, AddShortcuts = AddShortcuts }
+
 -- Builds a route from the current state. `state` = { player, speed, skipped, maxQuests }.
 -- `yield` (optional) is called periodically so the caller can spread work over frames.
 function Planner.Build(state, yield)
@@ -1062,6 +1240,7 @@ function Planner.Build(state, yield)
     yield = Pacer(yield)
     local start = state.player
     local speed = max(state.speed or 7, 1)
+    Planner.UseShortcuts(true)
     local log = Data.log
     local units = {}
     local deferred = {}
@@ -1131,6 +1310,7 @@ function Planner.Build(state, yield)
     end
 
     route = AvoidBlocked(route, start)
+    route = AddShortcuts(route, start, speed)
 
     -- Active quests that did not make the cut are listed separately.
     for _, unit in ipairs(units) do

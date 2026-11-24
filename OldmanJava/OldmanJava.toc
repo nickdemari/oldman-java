@@ -11,7 +11,12 @@
 
 NotInGame.lua
 Data.lua
+Shortcuts.lua
 Planner.lua
+TerrainKalimdor.lua
+Terrain.lua
+Path.lua
+AutoQuest.lua
 Style.lua
 UI.lua
 Map.lua

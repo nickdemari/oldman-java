@@ -32,6 +32,8 @@ local function InitSaved()
     if db.classQuests == nil then db.classQuests = true end
     if db.mapLabels == nil then db.mapLabels = true end
     if db.nextLines == nil then db.nextLines = 4 end
+    if db.autoQuest == nil then db.autoQuest = true end
+    if db.shortcuts == nil then db.shortcuts = true end
 
     OldmanJavaCharDB = OldmanJavaCharDB or {}
     local char = OldmanJavaCharDB
@@ -78,6 +80,7 @@ local function AddJob(fn, onDone, onError, name)
     jobs[#jobs + 1] = { co = coroutine.create(fn), onDone = onDone, onError = onError, name = name }
     driver:SetScript("OnUpdate", RunJobs)
 end
+SP.AddJob = AddJob -- Path.lua runs its terrain searches here, one per job
 
 ---------------------------------------------------------------------------
 -- Planning
@@ -124,6 +127,8 @@ local function StartPlan()
     planPending = false
     if not SP.ready or not Data.indexReady then return end
     if InCombatLockdown() then planPending = true; return end
+    -- Not from mid-air: Shortcuts asks for a plan when you land.
+    if UnitOnTaxi and UnitOnTaxi("player") then planPending = true; return end
     local player = Data.PlayerPoint()
     if not player then
         -- No map position (instance, loading screen). Try again shortly, with one timer.
@@ -156,6 +161,7 @@ local function StartPlan()
         -- Quest-log changes are held while planning; catch up before showing the new route.
         if logDirty then logDirty = false; CheckLog() end
         if SP.UI then SP.UI.OnPlan() end
+        if SP.AutoQuest then SP.AutoQuest.OnPlan() end
         if planPending then SP.RequestPlan("queued") end
     end, function(err)
         planRunning = false
@@ -181,6 +187,7 @@ end
 local function BuildIndex()
     AddJob(function()
         Data.BuildIndex(60)
+        Data.BuildInns(250)
     end, function()
         if SP.UI then SP.UI.SetStatus(nil) end
         SP.RequestPlan()
@@ -292,6 +299,12 @@ function handlers.PLAYER_REGEN_ENABLED()
     if planPending then SP.RequestPlan() end
 end
 
+-- Quest giver events for AutoQuest.lua.
+for event, fn in pairs(SP.AutoQuest and SP.AutoQuest.handlers or {}) do
+    assert(not handlers[event], event)
+    handlers[event] = fn
+end
+
 for event in pairs(handlers) do events:RegisterEvent(event) end
 events:SetScript("OnEvent", function(_, event, ...)
     local handler = handlers[event]
@@ -377,6 +390,51 @@ SlashCmdList.OLDMANJAVA = function(input)
         if SP.UI then SP.UI.Render() end -- sets or clears the waypoint; keeps the status line
     elseif cmd == "reset" then
         if SP.UI then SP.UI.ResetPosition() end
+    elseif cmd:match("^slope") then
+        local T = SP.Terrain
+        local value = tonumber(cmd:match("^slope%s+(%d+)$"))
+        local valid = false
+        for _, v in ipairs(T.LIMITS) do
+            if v == value then valid = true end
+        end
+        if valid then
+            SP.db.slopeLimit = value
+            if SP.Path then SP.Path.Reset() end
+            Print(string.format("the arrow now uses ground up to %d degrees steep.", value))
+        else
+            Print(string.format("the arrow uses ground up to %d degrees steep. /java slope 46, 50, 55, 60 or 68 changes it.",
+                SP.db.slopeLimit or T.DEFAULT_LIMIT))
+        end
+    elseif cmd == "terrain" then
+        -- Diagnostic: what the terrain data says about where you stand.
+        local T, p = SP.Terrain, Data.PlayerPoint()
+        if not p then
+            Print("no position here.")
+        elseif not T.Has(p.c) then
+            Print("no terrain data for this continent: the arrow points straight.")
+        else
+            local x, y = T.Cell(p.wx, p.wy)
+            local names = { [0] = "ground up to 46 degrees", "ground 46 to 50 degrees", "ground 50 to 55 degrees",
+                "ground 55 to 60 degrees", "ground 60 to 68 degrees", "ground steeper than 68 degrees", "no ground data",
+                "lava, slime or the like", "water deep enough to swim" }
+            local band = T.BandAt(p.c, x, y)
+            local verdict
+            if band == T.SWIM then
+                verdict = "swimmable"
+            elseif band == T.HURTS or band == T.NO_DATA then
+                verdict = "never used"
+            else
+                verdict = (T.Walkable(p.c, x, y) and "walkable" or "too steep")
+                    .. string.format(" at the %d degree limit", SP.db.slopeLimit or T.DEFAULT_LIMIT)
+            end
+            -- The game's own word on whether you're swimming, to check the water data against.
+            local swimming = IsSwimming and (IsSwimming() and "you're swimming" or "you're not swimming") or nil
+            Print(string.format("here: %s (cell %d, %d), %s.%s", names[band] or tostring(band), x, y, verdict,
+                swimming and (" Game says " .. swimming .. ".") or ""))
+            Print("arrow: " .. SP.Path.Status() .. ".")
+        end
+    elseif cmd == "travel" then
+        if SP.Shortcuts then SP.Shortcuts.Describe(Print) end
     elseif cmd == "nav" then
         -- Diagnostic: does the game's own navigation know a path to the current step?
         local node = SP.UI and SP.UI.CurrentNode()
@@ -406,6 +464,8 @@ SlashCmdList.OLDMANJAVA = function(input)
         Print("/java skip - skip the current quest (/java unskip clears skips)")
         Print("/java done - list every quest this character has completed")
         Print("/java waypoint - toggle map waypoints")
+        Print("/java slope - how steep the ground the arrow leads you over may be")
+        Print("/java travel - the flight points and hearthstone the route can use")
         Print("/java reset - move the window back to the center")
     end
 end

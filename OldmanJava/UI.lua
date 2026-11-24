@@ -53,11 +53,36 @@ end
 
 local donePoint = {} -- scratch player point for NodeDone, which keeps nothing
 
+local LANDED_NEAR = 200 -- yards from the flight point you were flying to
+
+-- Travel steps stay done once done: you may walk off again before the next plan drops them.
+local function TravelDone(node)
+    if node.done then return true end
+    local Data = SP.Data
+    local p = Data.PlayerPointInto(donePoint)
+    local done
+    if node.how == "fly" then
+        -- Taken the flight (the next step shows while you fly), or got there some other way.
+        done = (UnitOnTaxi and UnitOnTaxi("player")) or (p ~= nil and Data.Distance(p, node.exit) < LANDED_NEAR)
+    elseif node.how == "hearth" then
+        local S = SP.Shortcuts
+        done = (S and S.lastHearth and S.lastHearth >= (node.made or 0)) or (p ~= nil and Data.Distance(p, node.pt) < 150)
+    elseif node.how == "bind" then
+        -- Set at this inn since the step appeared, or the game already says it's set here.
+        local S = SP.Shortcuts
+        local home = S and S.Home()
+        done = (S and S.lastBound and S.lastBound >= (node.made or 0)) or (home ~= nil and Data.Distance(home.pt, node.pt) <= 150)
+    else
+        done = p ~= nil and (p.map == node.pt.map or Data.Distance(p, node.pt) < 150)
+    end
+    if done then node.done = true end
+    return done and true or false
+end
+
 local function NodeDone(node)
     local Data = SP.Data
     if node.kind == "travel" then
-        local p = Data.PlayerPointInto(donePoint)
-        return p ~= nil and (p.map == node.pt.map or Data.Distance(p, node.pt) < 150)
+        return TravelDone(node)
     elseif node.kind == "pickup" then
         return Data.log[node.q] ~= nil or Data.completed[node.q] == true
     elseif node.kind == "obj" then
@@ -294,8 +319,9 @@ UI.HuntTarget = HuntTarget
 ---------------------------------------------------------------------------
 -- Blocked paths
 ---------------------------------------------------------------------------
--- The arrow is a straight line and can't see cliffs. Moving for a while without getting any closer
--- means the direct way is blocked: the step moves later, or a hunt gives up on that spawn spot.
+-- Moving for a while without getting any closer means the way is blocked. When the arrow follows a
+-- walkable way from the terrain, the ground just ahead is marked blocked and another way is found.
+-- Otherwise (a straight line) the step moves later, or a hunt gives up on that spawn spot.
 local BLOCKED_AFTER = 20 -- seconds of moving without progress
 local BLOCKED_GAIN = 15  -- yards closer that counts as progress
 local BLOCKED_AWAY = 60  -- yards farther: heading somewhere else (or the long way round), start over
@@ -350,6 +376,11 @@ end
 
 local function OnBlocked(node, player, target)
     local now = GetTime()
+    if SP.Path and SP.Path.BlockAhead(player, target) then
+        blockedNote = { from = NodeKey(node), path = true, untilTime = now + BLOCKED_NOTE }
+        UI.Render()
+        return
+    end
     if node.hunt and node.spots then
         -- Spawn spots out of reach (up a ridge): skip that spot and its neighbours, try the next.
         for i, spot in ipairs(node.spots) do
@@ -384,6 +415,7 @@ end
 local function BlockedLine(node)
     if not blockedNote or GetTime() >= blockedNote.untilTime then return nil end
     local here = blockedNote.from == NodeKey(node)
+    if blockedNote.path then return here and "That way looks blocked. Finding another." or nil end
     if blockedNote.hunt then return here and "That spot looks out of reach. Trying the next one." or nil end
     if here then return "No straight way there. Look for a path around." end
     return "Couldn't get closer to " .. blockedNote.title .. ". Doing this first."
@@ -416,7 +448,7 @@ end
 local ownedWaypoint -- { map, x, y } of the waypoint Oldman Java placed, until it is cleared
 
 local function SetWaypoint(node, target)
-    if not SP.db.waypoint or not node or not node.pt or node.inBags then return end
+    if not SP.db.waypoint or not node or not node.pt or node.inBags or node.how == "hearth" then return end
     local pt = target or node.pt
     if pt == lastWaypointPt and lastWaypointKey then return end -- same spot as last call (search/hunt ticks)
     local key = pt.map .. ":" .. pt.x .. ":" .. pt.y
@@ -753,6 +785,14 @@ end
 -- Rendering
 ---------------------------------------------------------------------------
 
+-- "Use your Hearthstone" / "Hearthstone ready in 4 min"
+local function HearthLine()
+    local S = SP.Shortcuts
+    local left = S and S.CooldownLeft() or 0
+    if left > 1.5 then return "Hearthstone ready in " .. Style.FormatDuration(left) end
+    return "Use your Hearthstone"
+end
+
 local function ShowHero(node)
     local kindColor = KIND_COLOR[node.kind] or C.accent
     local label = node.label or "STEP"
@@ -762,6 +802,7 @@ local function ShowHero(node)
     hero.title:SetText(node.title or node.text or "")
     local sub = node.sub
     if sub == node.title then sub = nil end
+    if node.how == "hearth" then sub = HearthLine() end
     if node.search and node.spots then sub = SearchLine(node) end
     if node.hunt then sub = DropsLine(node) or sub end
     local note = BlockedLine(node)
@@ -838,7 +879,7 @@ function UI.Render()
         y = -40
     end
     -- Waypoints off, no step, or a step with no place (started from the bags): drop our pin.
-    if not SP.db.waypoint or not node or node.inBags then ClearWaypoint() end
+    if not SP.db.waypoint or not node or node.inBags or node.how == "hearth" then ClearWaypoint() end
 
     local collapsed = SP.db.collapsed
     -- Up next
@@ -997,6 +1038,17 @@ function UI.UpdateArrow()
     if not frame or not node then return end
     local arrow, center = compass.arrow, compass.center
     local Data = SP.Data
+    if node.how == "hearth" then
+        local S = SP.Shortcuts
+        local left = S and S.CooldownLeft() or 0
+        arrow:Hide()
+        center:SetText("HS")
+        center:SetTextColor(C.travel[1], C.travel[2], C.travel[3])
+        center:Show()
+        compass.distance:SetText(left > 1.5 and "Not yet" or "Hearth")
+        compass.direction:SetText(left > 1.5 and Style.FormatETA(left) or "ready")
+        return
+    end
     if node.inBags then
         arrow:Hide()
         center:SetText("BAG")
@@ -1042,7 +1094,12 @@ function UI.UpdateArrow()
         compass.direction:SetText("continent")
         return
     end
-    if WatchProgress(node, player, target, yards) then
+    -- On the way to the step, aim at the next corner of the walkable way when there is one.
+    local aim, remaining = target, yards
+    local corner, along = nil, nil
+    if SP.Path then corner, along = SP.Path.Aim(player, target) end
+    if corner then aim, remaining = corner, along end
+    if WatchProgress(node, player, target, remaining) then
         OnBlocked(node, player, target)
         return
     end
@@ -1056,7 +1113,7 @@ function UI.UpdateArrow()
         return
     end
     center:Hide()
-    local turn = Data.TurnAngle(player, target)
+    local turn = Data.TurnAngle(player, aim)
     if turn then
         arrow:SetRotation(turn)
         local off = math.abs(((turn + math.pi) % (2 * math.pi)) - math.pi)
@@ -1065,10 +1122,10 @@ function UI.UpdateArrow()
     else
         arrow:Hide() -- no facing available (e.g. inside an instance)
     end
-    compass.distance:SetText(Style.FormatDistance(yards))
-    -- Direction and straight-line travel time, e.g. "NE  ·  39s".
-    local eta = Style.FormatETA(yards / TravelSpeed())
-    local compassText = Data.Compass(player, target)
+    compass.distance:SetText(Style.FormatDistance(remaining))
+    -- Direction to walk now and the time to get there, e.g. "NE  ·  39s".
+    local eta = Style.FormatETA(remaining / TravelSpeed())
+    local compassText = Data.Compass(player, aim)
     compass.direction:SetText(compassText and (compassText .. "  ·  " .. eta) or eta)
 end
 
@@ -1083,6 +1140,8 @@ function UI.PrintRoute()
         local leg = ""
         if node.inBags then
             leg = "from bags"
+        elseif node.how == "hearth" then
+            leg = "hearthstone"
         elseif prev and node.pt then
             local yards = Data.Distance(prev, node.pt)
             leg = (yards == math.huge and "other continent" or Style.FormatDistance(yards)) .. " "
@@ -1091,7 +1150,7 @@ function UI.PrintRoute()
         local c = KIND_COLOR[node.kind] or C.accent
         DEFAULT_CHAT_FRAME:AddMessage(string.format("  %d. |cff%s%s|r %s  |cff999999(%s)|r", i, Style.Hex(c),
             node.label or node.kind, node.title or node.text or "", leg))
-        if node.pt and not node.inBags then prev = node.pt end
+        if node.pt and not node.inBags then prev = node.exit or node.pt end
     end
 end
 

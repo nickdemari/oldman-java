@@ -1,5 +1,6 @@
 -- Oldman Java world map overlay: soft shaded areas where each route objective is done (mobs, drops,
--- objects), a label per area, numbered markers for the next steps, and a thin line along the route.
+-- objects), a label per area, numbered markers for the next steps, and a thin line along the route
+-- that follows the walkable way where the terrain gives one (Path.lua).
 --
 -- Drawn through a map-canvas data provider, the supported way to add to the world map, into frames
 -- Oldman Java owns. Blizzard's pin pools are left untouched.
@@ -466,6 +467,47 @@ end
 -- Scratch tables reused by every Draw (it runs on each frame of a zoom).
 local drawOpen, stepPool, steps, groups, boxPool, boxes, order = {}, {}, {}, {}, {}, {}, {}
 local linePoint = {} -- scratch player point for the route line
+local wayX, wayY = {}, {} -- scratch: the corners of one route leg on the shown map
+
+-- A walkable way's corners projected onto a map (0-1), worked out once per way and map.
+-- false when a corner falls off the map.
+local function ProjectWay(path, mapID)
+    local proj = path.proj
+    if proj and proj.map == mapID then return proj.ok and proj end
+    proj = { map = mapID, ok = true }
+    for i, p in ipairs(path.points) do
+        local x, y = Map.Project(p, mapID)
+        if not x then proj.ok = false break end
+        proj[i * 2 - 1], proj[i * 2] = x, y
+    end
+    path.proj = proj
+    return proj.ok and proj
+end
+
+-- Fills wayX/wayY (screen space) with the corners between a and b for route leg k; returns the count.
+-- The first leg is the arrow's way from where you stand; the others are worked out step to step.
+local function WayCorners(k, a, b, mapID, W, H)
+    local Path = SP.Path
+    if not Path then return 0 end
+    local points, first, path
+    if k == 1 then
+        path, first = Path.Remaining(b)
+        if not path then return 0 end
+        points = path.points
+    else
+        path = Path.Between(a, b)
+        if not path then return 0 end
+        points, first = path.points, 2
+    end
+    local proj = path and ProjectWay(path, mapID)
+    if not proj then return 0 end
+    local n = 0
+    for i = first, #points - 1 do -- the last point is the step itself: the marker stands there
+        n = n + 1
+        wayX[n], wayY[n] = proj[i * 2 - 1] * W, -proj[i * 2] * H
+    end
+    return n
+end
 local LABEL_SHIFTS = { 0, 1, -1, 2, -2 } -- label slots tried, in label heights (+6) from its spot
 local function EarlierStep(a, b) return a.step < b.step end
 
@@ -567,40 +609,69 @@ local function Draw()
         AddBox(group.x, group.y, bw, bh)
     end
 
-    -- Route line from the player through each marker, ending exactly on the drawn markers.
+    -- Route line from the player through each marker, ending exactly on the drawn markers. Each leg
+    -- follows the walkable way where there is one, and goes straight otherwise.
     local thick, shadowThick = LINE * markerScale, (LINE + 2.5) * markerScale
-    local ax, ay
-    local px, py = Map.Project(SP.Data.PlayerPointInto(linePoint), mapID)
-    if px then ax, ay = px * W, -py * H end
-    local segment = 0
-    for k = 1, nGroups do
-        local bx, by = groups[k].x * markerScale, groups[k].y * markerScale
-        if ax then
-            segment = segment + 1
-            for pass = 1, 2 do
-                local line = Acquire(lines, NewLine)
-                local g = Given(line)
-                if g.ax ~= ax or g.ay ~= ay then
-                    line:SetStartPoint("TOPLEFT", areaFrame, ax, ay)
-                    g.ax, g.ay = ax, ay
-                end
-                if g.bx ~= bx or g.by ~= by then
-                    line:SetEndPoint("TOPLEFT", areaFrame, bx, by)
-                    g.bx, g.by = bx, by
-                end
-                local t = pass == 1 and shadowThick or thick
-                if g.thick ~= t then
-                    line:SetThickness(t)
-                    g.thick = t
-                end
-                if pass == 1 then
-                    Tint(line, 0, 0, 0, 0.45)
-                else
-                    Tint(line, 1, 1, 1, segment == 1 and 0.95 or 0.6)
-                end
+    local function LineTo(ax, ay, bx, by, alpha)
+        for pass = 1, 2 do
+            local line = Acquire(lines, NewLine)
+            local g = Given(line)
+            if g.ax ~= ax or g.ay ~= ay then
+                line:SetStartPoint("TOPLEFT", areaFrame, ax, ay)
+                g.ax, g.ay = ax, ay
+            end
+            if g.bx ~= bx or g.by ~= by then
+                line:SetEndPoint("TOPLEFT", areaFrame, bx, by)
+                g.bx, g.by = bx, by
+            end
+            local t = pass == 1 and shadowThick or thick
+            if g.thick ~= t then
+                line:SetThickness(t)
+                g.thick = t
+            end
+            if pass == 1 then
+                Tint(line, 0, 0, 0, 0.45)
+            else
+                Tint(line, 1, 1, 1, alpha)
             end
         end
+    end
+    local ax, ay
+    local from = SP.Data.PlayerPointInto(linePoint)
+    local px, py = Map.Project(from, mapID)
+    if px then ax, ay = px * W, -py * H end
+    local segment = 0
+    local last -- the previous marker's last step
+    for k = 1, nGroups do
+        local bx, by = groups[k].x * markerScale, groups[k].y * markerScale
+        local first = groups[k].steps[1].node
+        local to = first.pt
+        if ax and last and last.how == "fly" then
+            -- The flight itself: straight to where it lands, then the walk from there.
+            local ex, ey = Map.Project(last.exit, mapID)
+            if ex then
+                LineTo(ax, ay, ex * W, -ey * H, 0.35)
+                ax, ay = ex * W, -ey * H
+                from = last.exit
+            else
+                ax = nil
+            end
+        end
+        -- A hearth step is a teleport: no line leads into it.
+        if ax and first.how ~= "hearth" then
+            segment = segment + 1
+            local alpha = segment == 1 and 0.95 or 0.6
+            local n = WayCorners(k, from, to, mapID, W, H)
+            for i = 1, n do
+                LineTo(ax, ay, wayX[i], wayY[i], alpha)
+                ax, ay = wayX[i], wayY[i]
+            end
+            LineTo(ax, ay, bx, by, alpha)
+        end
         ax, ay = bx, by
+        from = to
+        local steps = groups[k].steps
+        last = steps[#steps].node
     end
 
     -- Search step: ring every possible spot; checked ones fade.
