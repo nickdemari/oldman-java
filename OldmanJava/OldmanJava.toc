@@ -3,7 +3,7 @@
 ## Notes: Oldman Java's leveling route for World of Warcraft: Forever: the fastest quest path, built live from your character's real quest history.
 ## IconTexture: Interface\AddOns\OldmanJava\media\cup
 ## Author: Nick Demari
-## Version: 0.1.0
+## Version: 0.2.0
 ## Dependencies: QuestieDB
 ## OptionalDeps: Questie
 ## SavedVariables: OldmanJavaDB
