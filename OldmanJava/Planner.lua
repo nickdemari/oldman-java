@@ -136,6 +136,22 @@ local function NewNode(kind, qid, pt, work, label, verb, title, sub)
     }
 end
 
+-- A step at one NPC (a quest giver, a vendor) that walks a path: Data tags its spawn points with
+-- every place it can be, and the arrow sweeps those instead of waiting on the spawn point.
+-- Not a hunt: when the way there is blocked, the step still moves later like any fixed step.
+local function Patrolling(node)
+    local patrol = node.pt and node.pt.patrol
+    if patrol and not node.spots then node.spots, node.patrol = patrol, true end
+    return node
+end
+
+-- A kill or drop step: mobs roam, so the arrow sweeps their spawn points, and the paths of the
+-- ones that patrol.
+local function Hunting(node, obj)
+    node.hunt, node.spots, node.sources = true, obj.sweep or obj.points, obj.sources
+    node.patrol = obj.patrols or nil
+end
+
 local LABEL = { kill = "KILL", item = "COLLECT", object = "USE", explore = "EXPLORE", event = "DO" }
 
 -- Panel label and verb for an objective. Scripted steps carry their own verb in the title
@@ -225,7 +241,9 @@ local function ActiveUnit(qid, entry, ref)
                     if obj and obj.search then
                         node.search, node.spots, node.names, node.label = true, obj.points, obj.names, "SEARCH"
                     elseif obj and (obj.kind == "kill" or (obj.kind == "item" and not obj.vendor and not obj.objectsOnly)) then
-                        node.hunt, node.spots, node.sources = true, obj.points, obj.sources
+                        Hunting(node, obj)
+                    elseif obj and obj.vendor then
+                        Patrolling(node)
                     end
                     -- Same key as the planned (not yet accepted) version of this objective,
                     -- so accepting a quest doesn't reshuffle the route.
@@ -260,7 +278,7 @@ local function ActiveUnit(qid, entry, ref)
         local sub = finisherName and ("to " .. finisherName) or nil
         if #notes > 0 then sub = (sub and (sub .. "  ·  ") or "") .. "also " .. table.concat(notes, ", ") end
         sub = WithNote(sub, BringNote(loc))
-        seq[#seq + 1] = NewNode("turnin", qid, finisher, TALK_TIME, "TURN IN", "Turn in", name, sub)
+        seq[#seq + 1] = Patrolling(NewNode("turnin", qid, finisher, TALK_TIME, "TURN IN", "Turn in", name, sub))
     end
 
     for _, node in ipairs(seq) do node.class = info and info.classQuest or nil end
@@ -303,7 +321,7 @@ local function CandidateUnit(info, ref)
     if info.itemOnly then
         seq[1] = NewNode("pickup", info.id, start, TALK_TIME, "START", "Start", info.name, "from an item in your bags")
     else
-        seq[1] = NewNode("pickup", info.id, start, TALK_TIME, "ACCEPT", "Accept", info.name, starter and ("from " .. starter) or nil)
+        seq[1] = Patrolling(NewNode("pickup", info.id, start, TALK_TIME, "ACCEPT", "Accept", info.name, starter and ("from " .. starter) or nil))
     end
     seq[1].inBags = info.itemOnly or nil -- no real location: no waypoint or distance
     seq[1].sub = WithNote(seq[1].sub, BringNote(loc))
@@ -320,7 +338,9 @@ local function CandidateUnit(info, ref)
             if obj.search then
                 node.search, node.spots, node.names, node.label = true, obj.points, obj.names, "SEARCH"
             elseif obj.kind == "kill" or (obj.kind == "item" and not obj.vendor and not obj.objectsOnly) then
-                node.hunt, node.spots, node.sources = true, obj.points, obj.sources -- mobs roam: the arrow sweeps spawns
+                Hunting(node, obj)
+            elseif obj.vendor then
+                Patrolling(node)
             end
             seq[#seq + 1] = node
         end
@@ -336,7 +356,7 @@ local function CandidateUnit(info, ref)
     end
     if loc.elite then sub = (sub and (sub .. "  ·  ") or "") .. "group recommended" end
     sub = WithNote(sub, BringNote(loc))
-    seq[#seq + 1] = NewNode("turnin", info.id, finisher, TALK_TIME, "TURN IN", "Turn in", info.name, sub)
+    seq[#seq + 1] = Patrolling(NewNode("turnin", info.id, finisher, TALK_TIME, "TURN IN", "Turn in", info.name, sub))
 
     for _, node in ipairs(seq) do node.class = info.classQuest or nil end
     local xp = Data.QuestXP(info.id, info.level)

@@ -57,7 +57,8 @@ local function ObjectivePoints(node)
     local loc = SP.Data.Locations(node.q)
     if not loc then return nil end
     local index = node.key and tonumber(node.key:match("^o(%d+)$"))
-    if index and loc.objectives[index] then return loc.objectives[index].points end
+    local obj = index and loc.objectives[index]
+    if obj then return obj.sweep or obj.points end -- a patrolling mob's path is part of its area
     return loc.all
 end
 

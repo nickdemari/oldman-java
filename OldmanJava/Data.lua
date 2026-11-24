@@ -930,13 +930,80 @@ local function Append(out, points)
     return out
 end
 
+-- An NPC with only a few spawn points that walks a path is rarely standing on one of them (a
+-- named mob, a quest giver who walks a road): the points of its path are places it can be too.
+local PATROL_MAX_SPAWNS = 3 -- with more spawns than this, one of them is always close by
+local PATROL_GAP = 30       -- yards between the path points kept (a sweep sees 40 yards around each)
+
+-- Points along an NPC's path that aren't already covered by a spawn point or an earlier path point.
+local function PatrolPath(npcId, spawns)
+    local paths = NpcDB.waypoints(npcId)
+    if type(paths) ~= "table" then return nil end
+    -- { [areaId] = { path, ... } } flattened to the shape of a spawn list.
+    local flat = {}
+    for areaId, list in pairs(paths) do
+        if type(list) == "table" then
+            local rows = {}
+            for _, path in ipairs(list) do
+                if type(path) == "table" then
+                    for _, row in ipairs(path) do
+                        if type(row) == "table" then rows[#rows + 1] = row end
+                    end
+                end
+            end
+            flat[areaId] = rows
+        end
+    end
+    local all, kept = AddSpawnPoints(flat, {}), {}
+    for i = 1, #all do
+        local p, covered = all[i], false
+        for j = 1, #spawns do
+            if Data.Distance(p, spawns[j]) < PATROL_GAP then covered = true; break end
+        end
+        if not covered then
+            for j = 1, #kept do
+                if Data.Distance(p, kept[j]) < PATROL_GAP then covered = true; break end
+            end
+        end
+        if not covered then kept[#kept + 1] = p end
+    end
+    return #kept > 0 and kept or nil
+end
+
+-- Spawn points of an NPC. When it patrols, each point carries .patrol: every place the NPC can
+-- be (its spawn points, then its path), with the path alone in .patrol.path.
 local function NpcSpawnPoints(npcId)
     local points = npcSpawnCache[npcId]
     if not points then
         points = AddSpawnPoints(NpcDB.spawns(npcId), {})
+        if #points > 0 and #points <= PATROL_MAX_SPAWNS then
+            local path = PatrolPath(npcId, points)
+            if path then
+                local sweep = Append(Append({}, points), path)
+                sweep.path = path
+                for i = 1, #points do points[i].patrol = sweep end
+            end
+        end
         if npcId ~= nil then npcSpawnCache[npcId] = points end
     end
     return points
+end
+
+-- The spawn points of an objective plus the paths of the patrolling NPCs among them: the places
+-- a sweep should cover. Returns nil when none of them patrols, and whether all of them do.
+local function WithPatrols(points)
+    local sweep, seen, all = nil, nil, #points > 0
+    for i = 1, #points do
+        local patrol = points[i].patrol
+        if not patrol then
+            all = false
+        elseif not (seen and seen[patrol]) then
+            if not sweep then sweep, seen = Append({}, points), {} end
+            seen[patrol] = true
+            Append(sweep, patrol.path)
+        end
+    end
+    return sweep, sweep ~= nil and all
 end
 
 local function ObjectSpawnPoints(objectId)
@@ -1118,6 +1185,11 @@ function Data.Locations(id)
         -- A crate, chest or other object with only a few possible spots: only some are spawned at a
         -- time and others may have just looted it, so the route searches them one by one.
         if (kind == "object" or entry.objectsOnly) and #points <= SEARCH_MAX_SPOTS then entry.search = true end
+        -- Mobs that walk a path: the arrow and the map cover the path as well as the spawn points.
+        -- The spot and the density still come from the spawn points alone.
+        if kind == "kill" or (kind == "item" and not entry.vendor and not entry.objectsOnly) then
+            entry.sweep, entry.patrols = WithPatrols(points)
+        end
         loc.objectives[#loc.objectives + 1] = entry
         for i = 1, #points do loc.all[#loc.all + 1] = points[i] end
     end

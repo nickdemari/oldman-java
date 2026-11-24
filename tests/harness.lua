@@ -278,10 +278,27 @@ I[4202] = { name = "Test Tusk", npcDrops = { 4003 } }
 quest(4104, { name = "Carcass Test", questLevel = 30, requiredLevel = 28, startedBy = { { 4001 } }, finishedBy = { { 4002 } },
     objectives = { nil, nil, { { 4202 } } }, requiredSourceItems = { 4201 } })
 
+-- NPCs that walk a path, in the Barrens at level 40 (out of the way of the other scenarios).
+-- One map unit is 40 yards there. The first path point sits on the spawn point and the third
+-- sits next to the second, so both are dropped.
+local function path(x, y) return { [17] = { { { x + 0.1, y }, { x + 1.25, y }, { x + 1.5, y }, { x + 2.5, y }, { x + 3.75, y } } } } end
+npc(4301, "Road Walker", 17, 30, 30, { waypoints = path(30, 30) })
+N[4302] = { name = "Patrol Captain", rank = 0, minLevel = 39, maxLevel = 40, spawns = { [17] = { { 20, 20 } } }, waypoints = path(20, 20) }
+mobs(4303, "Camp Guard", 17, 26, 20, 6, { minLevel = 39, maxLevel = 40, waypoints = path(26, 24) })
+N[4304] = { name = "Odd Walker", rank = 0, minLevel = 39, maxLevel = 40, spawns = { [17] = { { 24, 24 } } },
+    waypoints = { [17] = "junk", [215] = { 5, { "x", { 1 } } } } }
+I[4350] = { name = "Captain's Orders", npcDrops = { 4302, 4303 } }
+quest(4311, { name = "Patrol Kill", questLevel = 40, requiredLevel = 38, startedBy = { { 4301 } }, objectives = { { { 4302 } } } })
+quest(4312, { name = "Mixed Drops", questLevel = 40, requiredLevel = 38, startedBy = { { 4301 } }, objectives = { nil, nil, { { 4350 } } } })
+quest(4313, { name = "Odd Path", questLevel = 40, requiredLevel = 38, startedBy = { { 4301 } }, objectives = { { { 4304 } } } })
+N[4305] = { name = "Twin Walker", rank = 0, minLevel = 39, maxLevel = 40, spawns = { [17] = { { 40, 40 }, { 40, 45 } } }, waypoints = path(40, 40) }
+quest(4314, { name = "Two Spawns", questLevel = 40, requiredLevel = 38, startedBy = { { 4301 } }, objectives = { { { 4305 } } } })
+
 local XP = { [121] = { 3, 450 }, [116] = { 6, 700 }, [118] = { 3, 400 }, [120] = { 5, 500 }, [117] = { 7, 800 }, [119] = { 7, 800 }, [787] = { 3, 900 }, [100] = { 2, 170 }, [101] = { 4, 450 }, [102] = { 10, 800 }, [107] = { 3, 300 }, [109] = { 1, 80 },
     [110] = { 3, 250 }, [111] = { 3, 200 }, [113] = { 4, 500 }, [114] = { 3, 350 } }
 -- Level 30 quests pay about this much; escorts are worth their four minutes at this rate.
 XP[4101], XP[4102], XP[4103], XP[4104] = { 30, 2800 }, { 30, 2800 }, { 30, 2800 }, { 30, 2800 }
+XP[4311], XP[4312], XP[4313], XP[4314] = { 40, 3600 }, { 40, 3600 }, { 40, 3600 }, { 40, 3600 }
 
 local NUMERIC = { questLevel = true, requiredLevel = true, requiredMaxLevel = true, requiredRaces = true,
     requiredClasses = true, zoneOrSort = true, specialFlags = true, breadcrumbForQuestId = true, parentQuest = true,
@@ -1106,6 +1123,149 @@ do
     player.level = 3
     player.map, player.x, player.y = 1412, 0.44, 0.76
     fire("PLAYER_LEVEL_UP", 3)
+end
+
+-- Patrols: an NPC with a few spawn points that walks a path can be anywhere along it.
+do
+    local D = SP.Data
+    local savedLog, savedDone = questLog, completedIds
+    questLog, completedIds = {}, { 108 }
+    player.level = 40
+    local function at(x, y) player.map, player.x, player.y = 1413, x, y end
+    local function replan()
+        fire("PLAYER_LEVEL_UP", 40)
+        SlashCmdList.OLDMANJAVA("replan")
+        flush()
+        clock = clock + 2
+    end
+    local function run(seconds, step)
+        for i = 1, math.floor(seconds / 0.05) do
+            clock = clock + 0.05
+            if step then step(i) end
+            SP.UI.UpdateArrow()
+        end
+    end
+    local function find(q, kind)
+        for _, n in ipairs(SP.Planner.route) do if n.q == q and n.kind == kind then return n end end
+    end
+    at(0.30, 0.31)
+    replan()
+
+    -- The data: spawn points stay what the route is planned from; the path is extra places to look.
+    local kill = D.Locations(4311).objectives[1]
+    check(#kill.points == 1 and kill.spot == kill.points[1] and kill.density == 1,
+        "a patrolling mob is still planned from its one spawn point")
+    check(kill.sweep and #kill.sweep == 4 and kill.sweep[1] == kill.points[1] and kill.patrols == true,
+        "its path is swept too, without the points its spawn or an earlier point covers (" .. tostring(kill.sweep and #kill.sweep) .. ")")
+    local mixed = D.Locations(4312).objectives[1]
+    check(#mixed.points == 7 and mixed.sweep and #mixed.sweep == 10 and not mixed.patrols,
+        "a drop from a patroller and a camp sweeps his path; mobs with many spawns don't add theirs ("
+        .. #mixed.points .. ", " .. tostring(mixed.sweep and #mixed.sweep) .. ")")
+    local odd = D.Locations(4313).objectives[1]
+    check(odd and #odd.points == 1 and odd.sweep == nil and not odd.patrols, "path data in an unknown shape is ignored")
+    local twin = D.Locations(4314).objectives[1]
+    check(#twin.points == 2 and twin.sweep and #twin.sweep == 5 and twin.patrols == true
+        and twin.points[1].patrol == twin.points[2].patrol,
+        "an NPC with two spawn points and a path: both spawns and the path, once (" .. tostring(twin.sweep and #twin.sweep) .. ")")
+    check(D.Locations(4104).objectives[1].sweep == nil, "mobs that don't patrol have nothing extra to sweep")
+
+    -- The route: quest givers and turn-ins are looked for along their path but stay fixed steps.
+    local pickup, hunt, turnin = find(4311, "pickup"), find(4311, "obj"), find(4311, "turnin")
+    check(pickup and pickup.patrol and not pickup.hunt and #pickup.spots == 4 and pickup.spots[1] == pickup.pt,
+        "a quest giver who walks a road is looked for along it")
+    check(turnin and turnin.patrol and not turnin.hunt and #turnin.spots == 4, "and so is the NPC a quest is turned in to")
+    check(hunt and hunt.hunt and hunt.patrol and hunt.spots == kill.sweep and hunt.pt == kill.points[1],
+        "the kill step sweeps the mob's path and still starts from its spawn point")
+
+    if hunt then
+        local T, line = SP.UI.HuntTarget, SP.UI.PatrolLine
+        local s = hunt.spots
+        clock = clock + 1
+        check(T(hunt, s[1]) == s[2], "on the empty spawn point, the arrow moves on along the path")
+        check(line(hunt, "Patrol Kill") == "Patrol Kill  ·  patrols" and line(hunt, nil) == "patrols", "the panel says the mob patrols")
+        clock = clock + 1
+        check(T(hunt, s[2]) == s[3], "and keeps following it")
+        clock = clock + 1
+        T(hunt, s[3])
+        clock = clock + 1
+        local _, changed = T(hunt, s[4])
+        check(not changed and line(hunt, nil) == "patrols", "reaching the last spot says nothing yet: the mob may be right there")
+        -- Fighting at the end of the path (that's the mob): the wait starts when the fight ends.
+        inCombat = true
+        clock = clock + 30
+        _, changed = T(hunt, s[4])
+        inCombat = false
+        check(not changed and line(hunt, nil) == "patrols", "a fight at the end of the path doesn't count as waiting")
+        clock = clock + 10
+        _, changed = T(hunt, s[4])
+        check(not changed, "ten seconds after the fight is still too soon")
+        clock = clock + 6
+        _, changed = T(hunt, s[4])
+        check(changed and line(hunt, "Patrol Kill") == "Patrol Kill  ·  path checked, it'll be back",
+            "a while after the whole path with the step not done, the panel says so and keeps its line")
+        clock = clock + 300
+        _, changed = T(hunt, s[4])
+        check(not changed and line(hunt, nil) == "path checked, it'll be back", "and goes on saying so while you wait there")
+        clock = clock + 1
+        _, changed = T(hunt, D.MakePoint(1413, 0.60, 0.60))
+        check(changed and line(hunt, nil) == "patrols", "leaving the area starts a fresh look")
+    end
+
+    if turnin then
+        -- A path that takes longer to walk than swept spots take to come back still gets its line.
+        local T, line = SP.UI.HuntTarget, SP.UI.PatrolLine
+        for i = 1, 4 do clock = clock + 130; T(turnin, turnin.spots[i]) end
+        clock = clock + 16
+        local _, changed = T(turnin, turnin.spots[4])
+        check(changed and line(turnin, "to Road Walker") == "to Road Walker  ·  path checked, it'll be back",
+            "a long path is checked once every spot has been reached, however long that took")
+    end
+
+    -- In the log: the kill step and the turn-in of an accepted quest patrol too.
+    questLog = { { questID = 4311, title = "Patrol Kill", level = 40, complete = false,
+        objectives = { { text = "0/1 Patrol Captain slain", type = "monster", finished = false, have = 0, need = 1 } } } }
+    completedIds = { 108, 4312, 4313, 4314 }
+    fire("QUEST_LOG_UPDATE")
+    at(0.20, 0.21)
+    replan()
+    local activeHunt, activeTurnin = find(4311, "obj"), find(4311, "turnin")
+    check(activeHunt and activeHunt.hunt and activeHunt.patrol and #activeHunt.spots == 4, "an accepted quest's kill step sweeps the path")
+    check(activeTurnin and activeTurnin.patrol and not activeTurnin.hunt, "an accepted quest's turn-in looks along the path")
+    -- Walking the path through the real arrow update: the panel re-renders when the line changes.
+    local current = SP.UI.CurrentNode()
+    check(current == activeHunt, "the kill step is the current step (" .. tostring(current and current.text) .. ")")
+    if current == activeHunt then
+        for i = 1, 4 do
+            at(current.spots[i].x, current.spots[i].y)
+            run(2)
+        end
+        check(SP.UI.PatrolLine(current, nil) == "patrols", "at the end of the path, the panel waits before saying it's empty")
+        run(16)
+        check(SP.UI.PatrolLine(current, nil) == "path checked, it'll be back", "the arrow update flips the line by itself")
+    end
+
+    -- Blocked on the way to a patrolling quest giver: the step moves later, like any fixed step,
+    -- and the panel doesn't claim the path was checked.
+    questLog, completedIds = {}, { 108 }
+    fire("QUEST_LOG_UPDATE")
+    SP.Planner.blocked = {}
+    at(0.30, 0.3375) -- 150 yards south of the giver's spawn point
+    replan()
+    local first = SP.UI.CurrentNode()
+    check(first and first.kind == "pickup" and first.patrol, "blocked patrol test starts on the patrolling giver (" .. tostring(first and first.text) .. ")")
+    if first and first.patrol then
+        run(22, function(i) at(0.30 + (i % 2 == 0 and 0.0003 or 0), 0.3375) end)
+        flush()
+        check(SP.Planner.IsBlocked(first), "moving 20s without getting closer to a patrolling giver moves that step later")
+        check(SP.UI.PatrolLine(first, nil) == "patrols", "and the panel doesn't say its path was checked")
+    end
+
+    SP.Planner.blocked = {}
+    questLog, completedIds = savedLog, savedDone
+    player.level = 3
+    player.map, player.x, player.y = 1412, 0.44, 0.76
+    fire("PLAYER_LEVEL_UP", 3)
+    fire("QUEST_LOG_UPDATE")
 end
 
 -- Blocked paths: moving without getting closer moves the step later; real progress never does.

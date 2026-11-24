@@ -263,34 +263,66 @@ end
 
 UI.SearchTarget = SearchTarget
 
--- Hunt: mobs that roam a wide area (kill and drop objectives). Once you're near any of their
--- spawns, the arrow points at the nearest one instead of one fixed spot that might be up a ridge.
+-- Hunt: mobs that roam a wide area (kill and drop objectives), and any NPC that walks a path
+-- (a named mob, a quest giver on a road). Once you're near any of their spots, the arrow points
+-- at the nearest one instead of one fixed spot that might be up a ridge or empty.
 local HUNT_RANGE = 400   -- yards
 local HUNT_RECHECK = 0.5 -- seconds between nearest-spawn lookups
 local HUNT_SEEN = 40     -- yards: spawn spots you've passed this close are swept
 local HUNT_RESET = 120   -- seconds: swept spots come back (mobs respawn and wander)
-local hunt = { key = nil, target = nil, at = -1, waypoint = nil, swept = {} }
+local PATROL_WAIT = 15   -- seconds at the end of a path, out of combat, before saying it isn't there
+-- seen, seenCount, lapAt, checked: for a step at an NPC that walks a path, which of its spots
+-- you've been to since you came into the area, when the last of them was reached, and whether
+-- the panel now says the path was checked. Unlike swept, seen spots don't come back with time
+-- (a long path takes longer to walk than HUNT_RESET) and a blocked spot is not a seen one.
+local hunt = { key = nil, target = nil, at = -1, waypoint = nil, swept = {}, seen = {}, seenCount = 0, lapAt = nil, checked = false }
+
+local function NewLap()
+    hunt.seen, hunt.seenCount, hunt.lapAt = {}, 0, nil
+end
 
 -- Spawn spots are where mobs can appear, not where they are now. The arrow sweeps them: once
 -- you've passed a spot it moves on to the nearest one you haven't seen lately.
+-- Also returns true when "you've been to every spot and it wasn't there" starts or stops holding.
 local function HuntTarget(node, player)
     local now, key = GetTime(), NodeKey(node)
-    if hunt.key ~= key then hunt.waypoint, hunt.swept, hunt.target = nil, {}, nil end
+    if hunt.key ~= key then
+        hunt.waypoint, hunt.swept, hunt.target, hunt.checked = nil, {}, nil, false
+        NewLap()
+    end
     if hunt.key == key and hunt.target and now - hunt.at < HUNT_RECHECK then return hunt.target end
-    local Data, swept = SP.Data, hunt.swept
+    local Data, swept, seen, spots = SP.Data, hunt.swept, hunt.seen, node.spots
     local best, bestDistance, fallback, fallbackDistance = nil, HUNT_RANGE, nil, HUNT_RANGE
-    for i, spot in ipairs(node.spots) do
+    for i, spot in ipairs(spots) do
         local d = Data.Distance(player, spot)
-        if d <= HUNT_SEEN then swept[i] = now end
+        if d <= HUNT_SEEN then
+            swept[i] = now
+            if not seen[i] then seen[i] = true; hunt.seenCount = hunt.seenCount + 1 end
+        end
         if d < HUNT_RANGE then
             local fresh = not swept[i] or now - swept[i] >= HUNT_RESET
             if fresh and d < bestDistance then best, bestDistance = spot, d end
             if d < fallbackDistance then fallback, fallbackDistance = spot, d end
         end
     end
-    hunt.key, hunt.target, hunt.at = key, best or fallback or node.pt, now
-    return hunt.target
+    if not fallback then
+        if hunt.seenCount > 0 then NewLap() end -- left the area: coming back is a new look
+    elseif hunt.seenCount >= #spots and (not hunt.lapAt or (InCombatLockdown and InCombatLockdown())) then
+        hunt.lapAt = now -- the wait runs from the last spot reached, and from the end of a fight there
+    end
+    local checked = hunt.lapAt ~= nil and now - hunt.lapAt >= PATROL_WAIT
+    local changed = checked ~= hunt.checked
+    hunt.key, hunt.target, hunt.at, hunt.checked = key, best or fallback or node.pt, now, checked
+    return hunt.target, changed
 end
+
+-- An NPC that walks a path: say so, and say when its whole path has been walked without the step
+-- getting done (it's dead, or someone else got there first), so an empty spot isn't a puzzle.
+local function PatrolLine(node, sub)
+    local checked = hunt.key == NodeKey(node) and hunt.checked
+    return (sub and sub ~= "" and (sub .. "  ·  ") or "") .. (checked and "path checked, it'll be back" or "patrols")
+end
+UI.PatrolLine = PatrolLine
 
 -- "Drops from Greater Plainstrider, Fleeting Plainstrider" for item drops on hunt steps.
 local dropsLines = setmetatable({}, { __mode = "k" }) -- node -> line (or false); sources never change
@@ -805,6 +837,7 @@ local function ShowHero(node)
     if node.how == "hearth" then sub = HearthLine() end
     if node.search and node.spots then sub = SearchLine(node) end
     if node.hunt then sub = DropsLine(node) or sub end
+    if node.patrol then sub = PatrolLine(node, sub) end
     local note = BlockedLine(node)
     if note then sub = note end
     local subColor = note and C.warn or C.muted
@@ -873,7 +906,7 @@ function UI.Render()
     if node then
         y = ShowHero(node)
         -- Search steps aim the waypoint at the next unchecked spot (see UpdateArrow).
-        if SP.db.waypoint and not node.search and not node.hunt then SetWaypoint(node) end
+        if SP.db.waypoint and not node.search and not node.hunt and not node.patrol then SetWaypoint(node) end
     else
         HideHero()
         y = -40
@@ -1069,12 +1102,17 @@ function UI.UpdateArrow()
             return
         end
     end
-    if node.hunt and node.spots and player then
-        target = HuntTarget(node, player)
+    if (node.hunt or node.patrol) and node.spots and player then
+        local checkedChanged
+        target, checkedChanged = HuntTarget(node, player)
         -- Move the map waypoint only when the target really changes, so it doesn't jitter.
         if SP.db.waypoint and (not hunt.waypoint or Data.Distance(hunt.waypoint, target) > 150) then
             hunt.waypoint = target
             SetWaypoint(node, target)
+        end
+        if checkedChanged and node.patrol then
+            UI.Render() -- the line under the title says whether the path has been checked
+            return
         end
     end
     local yards = player and Data.Distance(player, target)
